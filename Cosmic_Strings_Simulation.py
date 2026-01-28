@@ -11,534 +11,680 @@ import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from scipy.stats import linregress
-from typing import Tuple, List, Any
-from dataclasses import dataclass, field
+from scipy.signal import find_peaks
+from scipy.ndimage import label
+
+N = 100                # Grid size
+dx = 1.0               # Spatial resolution
+dt = 0.05              # Time step
+total_steps = 1000     # Total number of steps
+anim_interval = 4      # Animation update interval
+fa = 1.0               # Vacuum expectation value
+lam = 1.0              # Self-interaction strength
+gamma = 0.0            # Damping coefficient
 
 
-
-@dataclass
-class SimulationParameters:
-    """Configuration parameters of the simulation"""
-    grid_size: int = 100
-    spatial_resolution: float = 1.0
-    time_step: float = 0.05
-    total_steps: int = 500
-    animation_interval: int = 4
-    vacuum_expectation: float = 1.0
-    self_interaction_strength: float = 1.0
-    damping_coefficient: float = 0.0
-    
-    
-    
-@dataclass
-class TimeEvolutionData:
-    """Stores time evolution data for easy access"""
-    times: List[float] = field(default_factory=list)
-    total_energy: List[float] = field(default_factory=list)
-    kinetic_energy: List[float] = field(default_factory=list)
-    gradient_energy: List[float] = field(default_factory=list)
-    potential_energy: List[float] = field(default_factory=list)
-    axion_energy: List[float] = field(default_factory=list)
-    string_length: List[float] = field(default_factory=list)
-    total_winding: List[float] = field(default_factory=list)
-    mean_field_magnitude: List[float] = field(default_factory=list)
-
-
-
-class AxionFieldSimulation:
+class AxionSim:
     """
-    This is the main class for axion field dynamics simulation.
-    Handles the numerical integration of the Klein-Gordon equation
-    for a complex scalar field with Mexican hat potential, along with
-    visualization and analysis of the dynamics
+    Main simulation class for axion field dynamics.
+    Handles field evolution, diagnostics, and visualization.
     """
-
-    def __init__(self, params: SimulationParameters):
-        """Initializes the simulation with given parameters"""
-        self.params = params
-        self.time_data = TimeEvolutionData()
-        self._initialize_fields()       # Initializes field arrays
-        self._setup_figures()           # Setup visualization
+    
+    def __init__(self):
+        """Initialize fields and setup visualization"""
+        # Initialize field arrays
+        self.phi_r = np.random.normal(0, 0.05, (N, N))
+        self.phi_i = np.random.normal(0, 0.05, (N, N))
+        self.phi_r_dot = np.zeros((N, N))
+        self.phi_i_dot = np.zeros((N, N))
+        self.phi_r_prev = self.phi_r.copy()
+        self.phi_i_prev = self.phi_i.copy()
         
-    def _initialize_fields(self) -> None:
-        """Initializes the complex field and its time derivatives"""
-        N = self.params.grid_size
-        self.phi_real = np.random.normal(0, 0.05, (N, N))
-        self.phi_imag = np.random.normal(0, 0.05, (N, N))
-        self.phi_real_dot = np.zeros((N, N))
-        self.phi_imag_dot = np.zeros((N, N))
+        # Initialize time series storage
+        self.t_list = []
+        self.E_tot = []
+        self.E_kin = []
+        self.E_grad = []
+        self.E_pot = []
+        self.E_ax = []
+        self.L_string = []
+        self.winding_tot = []
+        self.phi_mean = []
+        self.k_peak = []
+        self.flux = []
+        self.v_string = []
+        self.d_string = []
+        self.xi = []
+        self.n_segments = []
+        self.vort_rms = []
         
+        self.setup_plots()
+    
+    def setup_plots(self):
+        """Setup matplotlib figures and axes"""
+        # Fig 1
+        self.fig1 = plt.figure(figsize=(18, 14))
+        gs1 = self.fig1.add_gridspec(3, 3, hspace=0.3, wspace=0.4)
         
-    def _setup_figures(self) -> None:
-        """Matplotlib figures and axes"""
-        # Figure 1: Phase maps, energies, and power spectra
-        self.fig1 = plt.figure(figsize=(16, 12))
-        gs1 = self.fig1.add_gridspec(2, 3, hspace=0.2, wspace=0.7)
-        self.ax_phase = self.fig1.add_subplot(gs1[0, 0])            # Creates axes for first figure
-        self.ax_energy = self.fig1.add_subplot(gs1[0, 1])
-        self.ax_axion_energy = self.fig1.add_subplot(gs1[0, 2])
-        self.ax_spectrum = self.fig1.add_subplot(gs1[1, 0])
-        self.ax_radial = self.fig1.add_subplot(gs1[1, 1])
-        self.ax_axion_radial = self.fig1.add_subplot(gs1[1, 2])
-        # Figure 2: Velocity field and time evolution plots
-        self.fig2 = plt.figure(figsize=(16, 12))
-        gs2 = self.fig2.add_gridspec(2, 3, hspace=0.2, wspace=0.7)
-        self.ax_velocity = self.fig2.add_subplot(gs2[0, 0])         # Creates axes for second figure
-        self.ax_energy_time = self.fig2.add_subplot(gs2[0, 1])
-        self.ax_string_time = self.fig2.add_subplot(gs2[1, 0])
-        self.ax_scaling = self.fig2.add_subplot(gs2[1, 1])
-        self._setup_plot_elements()
+        self.ax1 = self.fig1.add_subplot(gs1[0, 0])
+        self.ax2 = self.fig1.add_subplot(gs1[0, 1])
+        self.ax3 = self.fig1.add_subplot(gs1[0, 2])
+        self.ax4 = self.fig1.add_subplot(gs1[1, 0])
+        self.ax5 = self.fig1.add_subplot(gs1[1, 1])
+        self.ax6 = self.fig1.add_subplot(gs1[1, 2])
+        self.ax7 = self.fig1.add_subplot(gs1[2, 0])
+        self.ax8 = self.fig1.add_subplot(gs1[2, 1])
+        self.ax9 = self.fig1.add_subplot(gs1[2, 2])
         
-    def _setup_plot_elements(self) -> None:
-        """Purely plots setup"""
-        N = self.params.grid_size
-        fa = self.params.vacuum_expectation
-        # Phase plot with string overlay
-        divider1 = make_axes_locatable(self.ax_phase)
-        cax1 = divider1.append_axes("right", size="5%", pad=0.05)
-        self.phase_image = self.ax_phase.imshow(np.zeros((N, N)), cmap='twilight', origin='lower', vmin=-np.pi, vmax=np.pi)
-        self.ax_phase.set_title("Phase with String Overlay")
-        self.ax_phase.axis('off')
-        self.fig1.colorbar(self.phase_image, cax=cax1, label=r"$\theta \in [-\pi, \pi]$")
-        # String markers
-        self.pos_scatter = self.ax_phase.plot([], [], 'o', markersize=8, label='+1 winding', color='yellow')[0]
-        self.neg_scatter = self.ax_phase.plot([], [], 'o', markersize=8, label='-1 winding', color='green')[0]
-        self.ax_phase.legend(loc='upper right', fontsize=8)
-        self._setup_energy_plots(fa)            # Energy density plots
-        self._setup_spectrum_plots(N)           # Power spectrum plots
-        self._setup_time_evolution_plots()      # Time evolution plots
-        # Figure titles
+        # Fig 2
+        self.fig2 = plt.figure(figsize=(18, 14))
+        gs2 = self.fig2.add_gridspec(3, 3, hspace=0.3, wspace=0.4)
+        
+        self.ax10 = self.fig2.add_subplot(gs2[0, 0])
+        self.ax11 = self.fig2.add_subplot(gs2[0, 1])
+        self.ax12 = self.fig2.add_subplot(gs2[1, 0])
+        self.ax13 = self.fig2.add_subplot(gs2[1, 1])
+        self.ax14 = self.fig2.add_subplot(gs2[0, 2])
+        self.ax15 = self.fig2.add_subplot(gs2[1, 2])
+        self.ax16 = self.fig2.add_subplot(gs2[2, 0])
+        self.ax17 = self.fig2.add_subplot(gs2[2, 1])
+        self.ax18 = self.fig2.add_subplot(gs2[2, 2])
+        
+        # Phase plot
+        div1 = make_axes_locatable(self.ax1)
+        cax1 = div1.append_axes("right", size="5%", pad=0.05)
+        self.im1 = self.ax1.imshow(np.zeros((N, N)), cmap='twilight', origin='lower', vmin=-np.pi, vmax=np.pi)
+        self.ax1.set_title("Phase with String Overlay")
+        self.ax1.axis('off')
+        self.fig1.colorbar(self.im1, cax=cax1, label=r"$\theta \in [-\pi, \pi]$")
+        self.scat_p, = self.ax1.plot([], [], 'o', ms=8, label='+1 winding', color='yellow')
+        self.scat_n, = self.ax1.plot([], [], 'o', ms=8, label='-1 winding', color='green')
+        self.ax1.legend(loc='upper right', fontsize=8)
+        
+        # Energy density
+        div2 = make_axes_locatable(self.ax2)
+        cax2 = div2.append_axes("right", size="5%", pad=0.05)
+        self.im2 = self.ax2.imshow(np.zeros((N, N)), cmap='inferno', origin='lower', vmin=0, vmax=fa)
+        self.ax2.set_title("Total Energy Density")
+        self.ax2.axis('off')
+        self.fig1.colorbar(self.im2, cax=cax2, label="Energy Density")
+        
+        # Axion energy
+        div3 = make_axes_locatable(self.ax3)
+        cax3 = div3.append_axes("right", size="5%", pad=0.05)
+        self.im3 = self.ax3.imshow(np.zeros((N, N)), cmap='inferno', origin='lower', vmin=0, vmax=fa)
+        self.ax3.set_title("Axion Energy Density")
+        self.ax3.axis('off')
+        self.fig1.colorbar(self.im3, cax=cax3, label="Energy Density")
+        
+        # Power spectrum
+        div4 = make_axes_locatable(self.ax4)
+        cax4 = div4.append_axes("right", size="5%", pad=0.05)
+        self.im4 = self.ax4.imshow(np.zeros((N, N)), cmap='magma', origin='lower', extent=[-N/2, N/2, -N/2, N/2])
+        self.ax4.set_title(r"Fourier Power Spectrum $|\tilde{\phi}|^2$")
+        self.ax4.set_xlabel(r"$k_x$")
+        self.ax4.set_ylabel(r"$k_y$")
+        self.fig1.colorbar(self.im4, cax=cax4, label=r"$\log_{10}(|\tilde{\phi}|^2)$")
+        
+        # Radial spectrum
+        self.line5, = self.ax5.plot([], [], lw=2, color='blue', alpha=0.8)
+        self.peak5, = self.ax5.plot([], [], 'ro', ms=8, label='Peaks')
+        self.txt5 = self.ax5.text(0.98, 0.85, '', transform=self.ax5.transAxes, fontsize=10,
+                                  va='top', ha='right', bbox=dict(facecolor='white', alpha=0.7))
+        self.ax5.set_title(r"Radial Power Spectrum $P(k)$")
+        self.ax5.set_xlabel(r"$\log_{10}(k)$")
+        self.ax5.set_ylabel(r"$\log_{10}(P(k))$")
+        self.ax5.set_xlim(np.log10(1), np.log10(N//2))
+        self.ax5.set_ylim(-10, 10)
+        self.ax5.legend(fontsize=8)
+        
+        # Axion spectrum
+        self.line6, = self.ax6.plot([], [], lw=2, color='red', alpha=0.8)
+        self.txt6 = self.ax6.text(0.98, 0.85, '', transform=self.ax6.transAxes, fontsize=10,
+                                  va='top', ha='right', bbox=dict(facecolor='white', alpha=0.7))
+        self.ax6.set_title(r"Axion Power Spectrum $P_\theta(k)$")
+        self.ax6.set_xlabel(r"$\log_{10}(k)$")
+        self.ax6.set_ylabel(r"$\log_{10}(P_{\theta}(k))$")
+        self.ax6.set_xlim(np.log10(1), np.log10(N//2))
+        self.ax6.set_ylim(-10, 10)
+        
+        # Correlation
+        self.line7, = self.ax7.plot([], [], lw=2, color='purple', alpha=0.8)
+        self.ax7.axhline(y=0, color='k', ls='--', alpha=0.3)
+        self.ax7.set_title("Two-Point Correlation Function")
+        self.ax7.set_xlabel("Distance")
+        self.ax7.set_ylabel(r"$C(r)$")
+        self.ax7.set_xlim(0, N // 2)
+        self.ax7.set_ylim(-0.5, 1)
+        
+        # Histogram
+        self.ax8.set_title("Field Magnitude Distribution")
+        self.ax8.set_xlabel(r"$|\phi| / f_a$")
+        self.ax8.set_ylabel("Probability Density")
+        
+        # Vorticity
+        div9 = make_axes_locatable(self.ax9)
+        cax9 = div9.append_axes("right", size="5%", pad=0.05)
+        self.im9 = self.ax9.imshow(np.zeros((N, N)), cmap='RdBu_r', origin='lower')
+        self.ax9.set_title("Vorticity Field")
+        self.ax9.axis('off')
+        self.fig1.colorbar(self.im9, cax=cax9, label="Vorticity")
+        
+        # Velocity field
+        self.ax10.set_title("Phase Velocity Field")
+        self.ax10.set_xlim(0, N)
+        self.ax10.set_ylim(0, N)
+        
+        # Energy time
+        self.line11a, = self.ax11.plot([], [], 'k', lw=2, alpha=0.8, label='Total')
+        self.line11b, = self.ax11.plot([], [], 'r', lw=1, alpha=0.8, label='Kinetic')
+        self.line11c, = self.ax11.plot([], [], 'g', lw=1, alpha=0.8, label='Gradient')
+        self.line11d, = self.ax11.plot([], [], 'b', lw=1, alpha=0.8, label='Potential')
+        self.ax11.set_title("Energy Evolution")
+        self.ax11.set_xlabel("Time")
+        self.ax11.set_ylabel("Energy Density")
+        self.ax11.legend(fontsize=8)
+        self.ax11.set_yscale('log')
+        
+        # String length
+        self.line12, = self.ax12.plot([], [], 'r', alpha=0.8)
+        self.ax12.set_title("String Length Density")
+        self.ax12.set_xlabel("Time")
+        self.ax12.set_ylabel("String Length/Area")
+        
+        # Scaling
+        self.line13, = self.ax13.plot([], [], 'b', alpha=0.8)
+        self.txt13 = self.ax13.text(0.05, 0.95, '', transform=self.ax13.transAxes,
+                                    fontsize=10, va='top', bbox=dict(facecolor='white', alpha=0.7))
+        self.ax13.set_title("String Network Scaling")
+        self.ax13.set_xlabel("log(Time)")
+        self.ax13.set_ylabel("log(String Length)")
+        
+        # String velocity
+        self.line14, = self.ax14.plot([], [], color='orange', alpha=0.8, lw=2)
+        self.ax14.set_title("Mean String Velocity")
+        self.ax14.set_xlabel("Time")
+        self.ax14.set_ylabel(r"$\langle v_{string} \rangle$")
+        
+        # String spacing
+        self.line15, = self.ax15.plot([], [], color='cyan', alpha=0.8, lw=2)
+        self.ax15.set_title("Inter-String Spacing")
+        self.ax15.set_xlabel("Time")
+        self.ax15.set_ylabel(r"$\langle d \rangle$")
+        
+        # Peak k
+        self.line16, = self.ax16.plot([], [], color='magenta', alpha=0.8, lw=2)
+        self.ax16.set_title("Spectral Peak Evolution")
+        self.ax16.set_xlabel("Time")
+        self.ax16.set_ylabel(r"$k_{peak}$")
+        
+        # Flux
+        self.line17, = self.ax17.plot([], [], color='brown', alpha=0.8, lw=2)
+        self.ax17.set_title("Energy Flux")
+        self.ax17.set_xlabel("Time")
+        self.ax17.set_ylabel(r"$\Phi_E$")
+        
+        # Correlation length
+        self.line18, = self.ax18.plot([], [], color='navy', alpha=0.8, lw=2)
+        self.ax18.set_title("Correlation Length")
+        self.ax18.set_xlabel("Time")
+        self.ax18.set_ylabel(r"$\xi$")
+        
         self.fig1.suptitle("Axion Field Dynamics - Spatial Analysis", fontsize=16)
         self.fig2.suptitle("Axion Field Dynamics - Temporal Analysis", fontsize=16)
+    
+
+    
+    def laplacian(self, f):
+        """Compute discrete Laplacian with periodic BC"""
+        return (-4*f + np.roll(f,1,0) + np.roll(f,-1,0) + 
+                np.roll(f,1,1) + np.roll(f,-1,1)) / dx**2
+    
+    def grad_sq(self, f):
+        """Compute squared gradient magnitude"""
+        dfx = (np.roll(f,-1,1) - np.roll(f,1,1)) / (2*dx)
+        dfy = (np.roll(f,-1,0) - np.roll(f,1,0)) / (2*dx)
+        return dfx**2 + dfy**2
+    
+    def grad(self, f):
+        """Compute gradient components"""
+        dfx = (np.roll(f,-1,1) - np.roll(f,1,1)) / (2*dx)
+        dfy = (np.roll(f,-1,0) - np.roll(f,1,0)) / (2*dx)
+        return dfx, dfy
+    
+    def step(self):
+        """Evolve field by one time step using Klein-Gordon equation"""
+        self.phi_r_prev = self.phi_r.copy()
+        self.phi_i_prev = self.phi_i.copy()
         
-    def _setup_energy_plots(self, fa: float) -> None:
-        """Setup energy density visualization plots"""
-        N = self.params.grid_size
-        # Total energy density
-        divider2 = make_axes_locatable(self.ax_energy)
-        cax2 = divider2.append_axes("right", size="5%", pad=0.05)
-        self.energy_img = self.ax_energy.imshow(np.zeros((N, N)), cmap='inferno', origin='lower', vmin=0, vmax=fa)
-        self.ax_energy.set_title("Total Energy Density")
-        self.ax_energy.axis('off')
-        self.fig1.colorbar(self.energy_img, cax=cax2, label="Energy Density")
-        # Axion energy density
-        divider3 = make_axes_locatable(self.ax_axion_energy)
-        cax3 = divider3.append_axes("right", size="5%", pad=0.05)
-        self.axion_energy_img = self.ax_axion_energy.imshow(np.zeros((N, N)), cmap='inferno', origin='lower', vmin=0, vmax=fa)
-        self.ax_axion_energy.set_title("Axion Energy Density")
-        self.ax_axion_energy.axis('off')
-        self.fig1.colorbar(self.axion_energy_img, cax=cax3, label="Energy Density")
+        r2 = self.phi_r**2 + self.phi_i**2
+        dVr = 2*lam*(r2 - fa**2/2)*self.phi_r
+        dVi = 2*lam*(r2 - fa**2/2)*self.phi_i
         
-    def _setup_spectrum_plots(self, N: int) -> None:
-        """Setup power spectrum visualization plots"""
-        # Fourier power spectrum
-        divider4 = make_axes_locatable(self.ax_spectrum)
-        cax4 = divider4.append_axes("right", size="5%", pad=0.05)
-        self.spectrum_img = self.ax_spectrum.imshow(np.zeros((N, N)), cmap='magma', origin='lower', extent=[-N/2, N/2, -N/2, N/2])
-        self.ax_spectrum.set_title(r"Fourier Power Spectrum $|\tilde{\phi}|^2$")
-        self.ax_spectrum.set_xlabel(r"$k_x$")
-        self.ax_spectrum.set_ylabel(r"$k_y$")
-        self.fig1.colorbar(self.spectrum_img, cax=cax4, label=r"$\log_{10}(|\tilde{\phi}|^2)$")
-        # Radial spectrum plots
-        self.spectrum_line, = self.ax_radial.plot([], [], lw=2, color='blue', alpha=0.8)
-        self.spectral_index_txt = self.ax_radial.text(0.98, 0.85, '', transform=self.ax_radial.transAxes, fontsize=12,
-                                                      verticalalignment='top', horizontalalignment='right',
-                                                      bbox=dict(facecolor='white', alpha=0.7))
-        self.ax_radial.set_title(r"Radial Power Spectrum $P(k)$")
-        self.ax_radial.set_xlabel(r"$\log_{10}(k)$")
-        self.ax_radial.set_ylabel(r"$\log_{10}(P(k))$")
-        self.ax_radial.set_xlim(np.log10(1), np.log10(N//2))
-        self.ax_radial.set_ylim(-10, 10)
-        # Axion spectrum
-        self.axion_spectrum_line, = self.ax_axion_radial.plot([], [], lw=2, color='red', alpha=0.8)
-        self.axion_spectral_index_txt = self.ax_axion_radial.text(0.98, 0.85, '', transform=self.ax_axion_radial.transAxes, fontsize=12,
-                                                                  verticalalignment='top', horizontalalignment='right',
-                                                                  bbox=dict(facecolor='white', alpha=0.7))
-        self.ax_axion_radial.set_title(r"Axion Power Spectrum $P_\theta(k)$")
-        self.ax_axion_radial.set_xlabel(r"$\log_{10}(k)$")
-        self.ax_axion_radial.set_ylabel(r"$\log_{10}(P_{\theta}(k))$")
-        self.ax_axion_radial.set_xlim(np.log10(1), np.log10(N//2))
-        self.ax_axion_radial.set_ylim(-10, 10)
+        self.phi_r_dot += dt * (self.laplacian(self.phi_r) - dVr - gamma*self.phi_r_dot)
+        self.phi_i_dot += dt * (self.laplacian(self.phi_i) - dVi - gamma*self.phi_i_dot)
         
-    def _setup_time_evolution_plots(self) -> None:
-        """Setup time evolution visualization plots"""
-        # Velocity field
-        self.ax_velocity.set_title("Phase Velocity Field")
-        self.ax_velocity.set_xlim(0, self.params.grid_size)
-        self.ax_velocity.set_ylim(0, self.params.grid_size)
+        self.phi_r += dt * self.phi_r_dot
+        self.phi_i += dt * self.phi_i_dot
+    
+
+    
+    def energy_components(self):
+        """Compute kinetic, gradient, and potential energy densities"""
+        kin = 0.5 * (self.phi_r_dot**2 + self.phi_i_dot**2)
+        grad = 0.5 * (self.grad_sq(self.phi_r) + self.grad_sq(self.phi_i))
+        r2 = self.phi_r**2 + self.phi_i**2
+        pot = lam * (r2 - fa**2/2)**2
+        return kin, grad, pot
+    
+    def axion_energy(self):
+        """Compute axion field energy density"""
+        theta = np.arctan2(self.phi_i, self.phi_r)
+        theta_dot = (self.phi_r*self.phi_i_dot - self.phi_i*self.phi_r_dot) / (self.phi_r**2 + self.phi_i**2 + 1e-12)
+        kin = 0.5 * fa**2 * theta_dot**2
+        grad = 0.5 * fa**2 * self.grad_sq(theta)
+        return kin + grad
+    
+    def energy_flux(self):
+        """Estimate energy flux"""
+        kin_c, grad_c, pot_c = self.energy_components()
+        kin_p, grad_p, pot_p = self.energy_components()
+        dE = np.mean((kin_c + grad_c + pot_c) - (kin_p + grad_p + pot_p))
+        dt_eff = dt * anim_interval
+        return np.abs(dE / dt_eff) if dt_eff > 0 else 0.0
+    
+
+    
+    def velocity_field(self):
+        """Compute phase velocity field"""
+        theta = np.arctan2(self.phi_i, self.phi_r)
+        theta_dot = (self.phi_r*self.phi_i_dot - self.phi_i*self.phi_r_dot) / (self.phi_r**2 + self.phi_i**2 + 1e-12)
+        gx, gy = self.grad(theta)
+        return -gy, gx, theta_dot
+    
+    def vorticity(self, vx, vy):
+        """Compute vorticity from velocity field"""
+        dvy_dx = (np.roll(vy,-1,1) - np.roll(vy,1,1)) / (2*dx)
+        dvx_dy = (np.roll(vx,-1,0) - np.roll(vx,1,0)) / (2*dx)
+        return dvy_dx - dvx_dy
+    
+
+    
+    def correlation_func(self):
+        """Compute two-point correlation function"""
+        phi_mag = np.sqrt(self.phi_r**2 + self.phi_i**2)
+        phi_norm = phi_mag - np.mean(phi_mag)
+        fft = np.fft.fft2(phi_norm)
+        power = np.abs(fft)**2
+        corr = np.fft.ifft2(power).real
+        corr = np.fft.fftshift(corr)
+        corr /= corr[N//2, N//2]
+        return self.radial_avg(corr)
+    
+    def corr_length(self, corr):
+        """Extract correlation length"""
+        target = 1.0/np.e
+        idx = np.where(corr < target)[0]
+        return float(idx[0]) if len(idx) > 0 else float(len(corr)-1)
+    
+    
+    
+    def power_spec(self):
+        """Compute Fourier power spectrum of complex field"""
+        phi_c = self.phi_r + 1j*self.phi_i
+        fft = np.fft.fftshift(np.fft.fft2(phi_c))
+        return np.abs(fft)**2 / phi_c.size
+    
+    def axion_spec(self):
+        """Compute power spectrum of axion phase field"""
+        theta = np.arctan2(self.phi_i, self.phi_r)
+        fft = np.fft.fftshift(np.fft.fft2(theta))
+        return np.abs(fft)**2 / theta.size
+    
+    def radial_avg(self, data):
+        """Compute radially averaged profile"""
+        y, x = np.indices(data.shape)
+        c = (data.shape[0]//2, data.shape[1]//2)
+        r = np.sqrt((x-c[1])**2 + (y-c[0])**2).astype(int)
+        return np.bincount(r.ravel(), weights=data.ravel()) / np.maximum(1, np.bincount(r.ravel()))
+    
+    def find_peaks(self, spec, k):
+        """Detect peaks in radial spectrum"""
+        peaks, _ = find_peaks(spec, prominence=0.5, distance=3)
+        return k[peaks].tolist() if len(peaks) > 0 else []
+    
+    
+    
+    # STRING ANALYSIS MACHINERY
+    
+    def unwrap(self, dth):
+        """Unwrap phase differences to [-π, π]"""
+        return (dth + np.pi) % (2*np.pi) - np.pi
+    
+    def detect_strings(self):
+        """Detect topological defects via winding number"""
+        theta = np.arctan2(self.phi_i, self.phi_r)
+        dth1 = self.unwrap(np.roll(theta,-1,1) - theta)
+        dth2 = self.unwrap(np.roll(theta,(-1,-1),(0,1)) - np.roll(theta,-1,1))
+        dth3 = self.unwrap(np.roll(theta,-1,0) - np.roll(theta,(-1,-1),(0,1)))
+        dth4 = self.unwrap(theta - np.roll(theta,-1,0))
+        w = (dth1[:-1,:-1] + dth2[:-1,:-1] + dth3[:-1,:-1] + dth4[:-1,:-1])
+        return w / (2*np.pi)
+    
+    def string_length(self):
+        """Compute total string length per unit area"""
+        w = self.detect_strings()
+        L = np.sum(np.abs(w)) * dx
+        return L / (N*N*dx**2)
+    
+    def string_velocity(self):
+        """Estimate mean velocity of string network"""
+        wind = self.detect_strings()
+        mask = np.abs(wind) > 0.5
+        if np.sum(mask) == 0:
+            return 0.0
+        vx, vy, _ = self.velocity_field()
+        vx = vx[:-1, :-1]
+        vy = vy[:-1, :-1]
+        vmag = np.sqrt(vx**2 + vy**2)
+        return float(np.mean(vmag[mask]))
+    
+    def string_spacing(self):
+        """Compute mean inter-string distance"""
+        wind = self.detect_strings()
+        wind_int = np.round(wind).astype(int)
+        sy, sx = np.where(np.abs(wind_int) > 0)
+        if len(sx) < 2:
+            return 0.0
         
-        # Energy evolution
-        self.energy_lines = {
-            'total': self.ax_energy_time.plot([], [], 'black', lw=2, alpha=0.8, label='Total')[0],
-            'kinetic': self.ax_energy_time.plot([], [], 'red', lw=1, alpha=0.8, label='Kinetic')[0],
-            'gradient': self.ax_energy_time.plot([], [], 'green', lw=1, alpha=0.8, label='Gradient')[0],
-            'potential': self.ax_energy_time.plot([], [], 'blue', lw=1, alpha=0.8, label='Potential')[0],
-        }
-        self.ax_energy_time.set_title("Energy Evolution")
-        self.ax_energy_time.set_xlabel("Time")
-        self.ax_energy_time.set_ylabel("Energy Density")
-        self.ax_energy_time.legend(fontsize=8)
-        self.ax_energy_time.set_yscale('log')
+        pos = np.column_stack([sx, sy])
+        if len(pos) > 100:
+            idx = np.random.choice(len(pos), 100, replace=False)
+            pos = pos[idx]
         
-        # String evolution
-        self.string_length_line, = self.ax_string_time.plot([], [], color='red', alpha=0.8)
-        self.ax_string_time.set_title("String Length Density")
-        self.ax_string_time.set_xlabel("Time")
-        self.ax_string_time.set_ylabel("String Length/Area")
+        dists = []
+        for p in pos:
+            diff = pos - p
+            # Handle periodic boundaries
+            diff = np.where(diff > N/2, diff - N, diff)
+            diff = np.where(diff < -N/2, diff + N, diff)
+            d = np.sqrt(np.sum(diff**2, axis=1))
+            d = d[d > 0]
+            if len(d) > 0:
+                dists.append(np.min(d))
         
-        # Scaling analysis
-        self.scaling_line, = self.ax_scaling.plot([], [], color='blue', alpha=0.8)
-        self.ax_scaling.set_title("String Network Scaling")
-        self.ax_scaling.set_xlabel("log(Time)")
-        self.ax_scaling.set_ylabel("log(String Length)")
+        return float(np.mean(dists)) if len(dists) > 0 else 0.0
+    
+    def count_segments(self):
+        """Count number of disconnected string segments"""
+        wind = self.detect_strings()
+        wind_int = np.round(wind).astype(int)
+        mask = np.abs(wind_int) > 0
+        _, n = label(mask)
+        return n
+    
+
+    
+    def store_data(self, step):
+        """Store current field state for time evolution analysis"""
+        kin, grad, pot = self.energy_components()
+        E_ax = self.axion_energy()
+        L_str = self.string_length()
+        wind = self.detect_strings()
         
+        self.t_list.append(step * dt)
+        self.E_tot.append(np.mean(kin + grad + pot))
+        self.E_kin.append(np.mean(kin))
+        self.E_grad.append(np.mean(grad))
+        self.E_pot.append(np.mean(pot))
+        self.E_ax.append(np.mean(E_ax))
+        self.L_string.append(L_str)
+        self.winding_tot.append(np.sum(np.abs(wind)))
+        self.phi_mean.append(np.mean(np.sqrt(self.phi_r**2 + self.phi_i**2)))
         
-    def compute_laplacian(self, field: np.ndarray) -> np.ndarray:
-        """
-        Computes discrete Laplacian using finite differences with periodic boundary conditions
-        Args: field: 2D array scalar field
-        Returns: 2D array Laplacian
-        """
-        dx = self.params.spatial_resolution
-        return (-4 * field +
-                np.roll(field, +1, axis=0) + np.roll(field, -1, axis=0) +
-                np.roll(field, +1, axis=1) + np.roll(field, -1, axis=1)
-                ) / dx**2
+        # Spectral diagnostics
+        P = self.power_spec()
+        rad = self.radial_avg(P)
+        k = np.arange(len(rad))
+        peaks = self.find_peaks(rad, k)
+        self.k_peak.append(peaks[0] if len(peaks) > 0 else 0.0)
+        
+        # String network diagnostics
+        self.flux.append(self.energy_flux())
+        self.v_string.append(self.string_velocity())
+        self.d_string.append(self.string_spacing())
+        
+        # Correlation diagnostics
+        corr = self.correlation_func()
+        self.xi.append(self.corr_length(corr))
+        self.n_segments.append(self.count_segments())
+        
+        # Vorticity diagnostics
+        vx, vy, _ = self.velocity_field()
+        vort = self.vorticity(vx, vy)
+        self.vort_rms.append(np.sqrt(np.mean(vort**2)))
     
-    def compute_gradient_squared(self, field: np.ndarray) -> np.ndarray:
-        """
-        Computes squared gradient magnitude using central differences
-        Args: field: 2D array scalar field
-        Returns: 2D array gradient squared magnitude
-        """
-        dx = self.params.spatial_resolution
-        df_dx = (np.roll(field, -1, axis=1) - np.roll(field, 1, axis=1)) / (2 * dx)
-        df_dy = (np.roll(field, -1, axis=0) - np.roll(field, 1, axis=0)) / (2 * dx)
-        return df_dx**2 + df_dy**2
+
     
-    def compute_gradient(self, field: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Computes gradient vector field using central differences
-        Args: field: 2D array scalar field
-        Returns: (gradient_x, gradient_y)
-        """
-        dx = self.params.spatial_resolution
-        df_dx = (np.roll(field, -1, axis=1) - np.roll(field, 1, axis=1)) / (2 * dx)
-        df_dy = (np.roll(field, -1, axis=0) - np.roll(field, 1, axis=0)) / (2 * dx)
-        return df_dx, df_dy
-    
-    def compute_energy_components(self, phi_r: np.ndarray, phi_i: np.ndarray, 
-                                  phi_r_dot: np.ndarray, phi_i_dot: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """
-        Computes energy density components separately
-        Args: phi_r, phi_i: Real and imaginary parts of the field
-              phi_r_dot, phi_i_dot: Time derivatives of field components
-        Returns: (kinetic, gradient, potential) energy densities
-        """
-        fa = self.params.vacuum_expectation
-        lambda_ = self.params.self_interaction_strength
-        kinetic = 0.5 * (phi_r_dot**2 + phi_i_dot**2)
-        gradient = 0.5 * (self.compute_gradient_squared(phi_r) + 
-                         self.compute_gradient_squared(phi_i))
-        r2 = phi_r**2 + phi_i**2
-        potential = lambda_ * (r2 - fa**2 / 2)**2
-        return kinetic, gradient, potential
-    
-    def compute_axion_energy_density(self, phi_r: np.ndarray, phi_i: np.ndarray, 
-                                     phi_r_dot: np.ndarray, phi_i_dot: np.ndarray) -> np.ndarray:
-        """
-        Computes axion energy density
-        Args: phi_r, phi_i: Real and imaginary parts of the field
-              phi_r_dot, phi_i_dot: Time derivatives of field components 
-        Returns: 2D array axion energy density
-        """
-        fa = self.params.vacuum_expectation
-        theta = np.arctan2(phi_i, phi_r)
-        theta_dot = (phi_r * phi_i_dot - phi_i * phi_r_dot) / (phi_r**2 + phi_i**2 + 1e-12)
-        grad_sq_theta = self.compute_gradient_squared(theta)
-        kinetic = 0.5 * fa**2 * theta_dot**2
-        gradient = 0.5 * fa**2 * grad_sq_theta
-        return kinetic + gradient
-    
-    def compute_phase_velocity_field(self, phi_r: np.ndarray, phi_i: np.ndarray, 
-                                     phi_r_dot: np.ndarray, phi_i_dot: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """
-        Computes velocity field
-        Args: phi_r, phi_i: Real and imaginary parts of the field
-              phi_r_dot, phi_i_dot: Time derivatives of field components 
-        Returns: (v_x, v_y, theta_dot)
-        """
-        theta = np.arctan2(phi_i, phi_r)
-        theta_dot = (phi_r * phi_i_dot - phi_i * phi_r_dot) / (phi_r**2 + phi_i**2 + 1e-12)
-        grad_theta_x, grad_theta_y = self.compute_gradient(theta)
-        v_x = -grad_theta_y        # Velocity field perpendicular to phase gradient
-        v_y = grad_theta_x
-        return v_x, v_y, theta_dot
-    
-    
-    
-    @staticmethod
-    def unwrap_angle(dtheta: np.ndarray) -> np.ndarray:
-        """
-        Unwraps angle differences into [-π, π] range
-        Args: dtheta: Array of angle differences
-        Returns: Unwrapped angles
-        """
-        return (dtheta + np.pi) % (2 * np.pi) - np.pi
-    
-    def detect_axion_strings(self, phi_r: np.ndarray, phi_i: np.ndarray) -> np.ndarray:
-        """
-        Detects axion strings by computing winding number around plaquettes
-        Args: phi_r, phi_i: Real and imaginary parts of the field
-        Returns: 2D array of winding numbers (float values)
-        """
-        theta = np.arctan2(phi_i, phi_r)
-        dtheta1 = self.unwrap_angle(np.roll(theta, -1, axis=1) - theta)
-        dtheta2 = self.unwrap_angle(np.roll(theta, (-1, -1), axis=(0, 1)) - np.roll(theta, -1, axis=1))
-        dtheta3 = self.unwrap_angle(np.roll(theta, -1, axis=0) - np.roll(theta, (-1, -1), axis=(0, 1)))
-        dtheta4 = self.unwrap_angle(theta - np.roll(theta, -1, axis=0))
-        total_winding = (dtheta1[:-1, :-1] + dtheta2[:-1, :-1] + dtheta3[:-1, :-1] + dtheta4[:-1, :-1])
-        return total_winding / (2 * np.pi)
-    
-    def compute_string_length_density(self, phi_r: np.ndarray, phi_i: np.ndarray) -> float:
-        """
-        Computes total string length per unit area
-        Args: phi_r, phi_i: Real and imaginary parts of the field
-        Returns: String length density
-        """
-        winding_float = self.detect_axion_strings(phi_r, phi_i)
-        dx = self.params.spatial_resolution
-        N = self.params.grid_size
-        string_length = np.sum(np.abs(winding_float)) * dx
-        return string_length / (N * N * dx**2)
-    
-    def compute_power_spectrum(self, phi_r: np.ndarray, phi_i: np.ndarray) -> np.ndarray:
-        """
-        Computes Fourier power spectrum of the complex field
-        Args: phi_r, phi_i: Real and imaginary parts of the field
-        Returns: 2D power spectrum array
-        """
-        phi_complex = phi_r + 1j * phi_i
-        fft_phi = np.fft.fftshift(np.fft.fft2(phi_complex))
-        return np.abs(fft_phi)**2 / phi_complex.size
-    
-    def compute_axion_power_spectrum(self, phi_r: np.ndarray, phi_i: np.ndarray) -> np.ndarray:
-        """
-        Computes power spectrum of the axion phase field
-        Args: phi_r, phi_i: Real and imaginary parts of the field
-        Returns: 2D power spectrum array of the phase
-        """
-        theta = np.arctan2(phi_i, phi_r)
-        fft_theta = np.fft.fftshift(np.fft.fft2(theta))
-        return np.abs(fft_theta)**2 / theta.size
-    
-    
-    
-    @staticmethod
-    def compute_radial_profile(data: np.ndarray) -> np.ndarray:
-        """
-        Computes radially averaged profile of 2D data
-        Args: data: 2D array to be radially averaged
-        Returns: 1D radially averaged profile
-        """
-        N = data.shape[0]
-        y, x = np.indices((N, N))
-        center = (N // 2, N // 2)
-        r = np.sqrt((x - center[1])**2 + (y - center[0])**2).astype(int)
-        radial_mean = np.bincount(r.ravel(), weights=data.ravel()) / np.maximum(1, np.bincount(r.ravel()))
-        return radial_mean
-    
-    def update_field(self) -> None:
-        """
-        Updates field using Klein-Gordon equation with possible damping
-        """
-        dt = self.params.time_step
-        lambda_ = self.params.self_interaction_strength
-        fa = self.params.vacuum_expectation
-        damping = self.params.damping_coefficient
-        r2 = self.phi_real**2 + self.phi_imag**2                    # Computes potential derivatives
-        dV_real = 2 * lambda_ * (r2 - fa**2 / 2) * self.phi_real
-        dV_imag = 2 * lambda_ * (r2 - fa**2 / 2) * self.phi_imag
-        # Updates time derivatives (Klein-Gordon equation)
-        self.phi_real_dot += dt * (self.compute_laplacian(self.phi_real) - dV_real - damping * self.phi_real_dot)
-        self.phi_imag_dot += dt * (self.compute_laplacian(self.phi_imag) - dV_imag - damping * self.phi_imag_dot)
-        # Updates field values
-        self.phi_real += dt * self.phi_real_dot
-        self.phi_imag += dt * self.phi_imag_dot
-    
-    def store_time_evolution_data(self, step: int) -> None:
-        """
-        Stores current field state data for time evolution analysis
-        """
-        dt = self.params.time_step
-        kinetic, gradient, potential = self.compute_energy_components(self.phi_real, self.phi_imag, self.phi_real_dot, self.phi_imag_dot)
-        axion_energy = self.compute_axion_energy_density(self.phi_real, self.phi_imag, self.phi_real_dot, self.phi_imag_dot)
-        string_length = self.compute_string_length_density(self.phi_real, self.phi_imag)
-        winding_map = self.detect_axion_strings(self.phi_real, self.phi_imag)
-        self.time_data.times.append(step * dt)
-        self.time_data.total_energy.append(np.mean(kinetic + gradient + potential))
-        self.time_data.kinetic_energy.append(np.mean(kinetic))
-        self.time_data.gradient_energy.append(np.mean(gradient))
-        self.time_data.potential_energy.append(np.mean(potential))
-        self.time_data.axion_energy.append(np.mean(axion_energy))
-        self.time_data.string_length.append(string_length)
-        self.time_data.total_winding.append(np.sum(np.abs(winding_map)))
-        self.time_data.mean_field_magnitude.append(np.mean(np.sqrt(self.phi_real**2 + self.phi_imag**2)))
-    
-    def update_visualization(self, frame: int) -> Tuple[Any, ...]:
-        """
-        Updates all visualization elements for animation
-        """
-        current_step = frame * self.params.animation_interval
-        for _ in range(self.params.animation_interval):
-            self.update_field()
-        self.store_time_evolution_data(current_step)
-        self._update_phase_visualization(frame, current_step)
-        self._update_energy_visualizations()
-        self._update_velocity_field(frame)
-        self._update_spectrum_visualizations()
-        self._update_time_evolution_plots()
-        return (self.phase_image, self.pos_scatter, self.neg_scatter, 
-                self.energy_img, self.axion_energy_img, self.spectrum_img,
-                self.spectrum_line, self.axion_spectrum_line)
-    
-    def _update_phase_visualization(self, frame: int, current_step: int) -> None:
-        """Updates phase map and string overlays"""
-        theta = np.arctan2(self.phi_imag, self.phi_real)
-        self.phase_image.set_data(theta)
-        winding_float = self.detect_axion_strings(self.phi_real, self.phi_imag)
-        winding_rounded = np.round(winding_float).astype(int)
-        pos_y, pos_x = np.where(winding_rounded == 1)
-        neg_y, neg_x = np.where(winding_rounded == -1)
-        self.pos_scatter.set_data(pos_x + 0.5, pos_y + 0.5)
-        self.neg_scatter.set_data(neg_x + 0.5, neg_y + 0.5)
-        net_winding = np.sum(winding_float)
-        total_abs = np.sum(np.abs(winding_float))
-        max_wind = np.max(np.abs(winding_float))
-        self.ax_phase.set_title(f"Phase with String Overlay\n"
-                                f"Step {current_step} | Net: {net_winding:.2f}, "
-                                f"|w|: {total_abs:.2f}, Max |w|: {max_wind:.2f}")
-    
-    def _update_energy_visualizations(self) -> None:
-        """Updates energy density visualizations"""
-        kinetic, gradient, potential = self.compute_energy_components(self.phi_real, self.phi_imag, self.phi_real_dot, self.phi_imag_dot)
-        total_energy = kinetic + gradient + potential
-        self.energy_img.set_data(total_energy)
-        axion_energy = self.compute_axion_energy_density(self.phi_real, self.phi_imag, self.phi_real_dot, self.phi_imag_dot)
-        self.axion_energy_img.set_data(axion_energy)
-    
-    def _update_velocity_field(self, frame: int) -> None:
-        """Updates velocity field visualization"""
-        if frame % 2 == 0:  # Updates less frequently for performance
-            v_x, v_y, _ = self.compute_phase_velocity_field(self.phi_real, self.phi_imag, self.phi_real_dot, self.phi_imag_dot)
-            N = self.params.grid_size
+    def update(self, frame):
+        """Update visualization for animation frame"""
+        step = frame * anim_interval
+        for _ in range(anim_interval):
+            self.step()
+        self.store_data(step)
+        
+        # Update phase
+        theta = np.arctan2(self.phi_i, self.phi_r)
+        self.im1.set_data(theta)
+        wind = self.detect_strings()
+        wind_int = np.round(wind).astype(int)
+        py, px = np.where(wind_int == 1)
+        ny, nx = np.where(wind_int == -1)
+        self.scat_p.set_data(px+0.5, py+0.5)
+        self.scat_n.set_data(nx+0.5, ny+0.5)
+        n_seg = self.n_segments[-1] if self.n_segments else 0
+        net_w = np.sum(wind)
+        tot_w = np.sum(np.abs(wind))
+        max_w = np.max(np.abs(wind))
+        self.ax1.set_title(f"Phase with String Overlay\n"
+                          f"Step {step} | Net: {net_w:.2f}, "
+                          f"|w|: {tot_w:.2f}, Segments: {n_seg}")
+        
+        # Update energy
+        kin, grad, pot = self.energy_components()
+        self.im2.set_data(kin + grad + pot)
+        self.im3.set_data(self.axion_energy())
+        
+        # Update spectrum
+        P = self.power_spec()
+        self.im4.set_data(np.log10(P + 1e-12))
+        
+        rad_phi = self.radial_avg(np.log10(P + 1e-12))
+        P_ax = self.axion_spec()
+        rad_ax = self.radial_avg(np.log10(P_ax + 1e-12))
+        
+        k = np.arange(len(rad_phi))
+        logk = np.log10(k[1:] + 1e-12)
+        self.line5.set_data(logk, rad_phi[1:])
+        self.line6.set_data(logk, rad_ax[1:])
+        
+        peaks = self.find_peaks(rad_phi[1:], k[1:])
+        if len(peaks) > 0:
+            pk_logk = np.log10(np.array(peaks) + 1e-12)
+            pk_val = np.interp(pk_logk, logk, rad_phi[1:])
+            self.peak5.set_data(pk_logk, pk_val)
+        else:
+            self.peak5.set_data([], [])
+        
+        mask = (k[1:] > 4) & (k[1:] < N//2)
+        if np.any(mask) and len(logk[mask]) > 3:
+            s, _, _, _, _ = linregress(logk[mask], rad_phi[1:][mask])
+            self.txt5.set_text(f'n = {-s:.2f}')
+            s2, _, _, _, _ = linregress(logk[mask], rad_ax[1:][mask])
+            self.txt6.set_text(f'n = {-s2:.2f}')
+        
+        # Update velocity
+        if frame % 2 == 0:
+            vx, vy, _ = self.velocity_field()
             skip = 8
             X, Y = np.meshgrid(np.arange(0, N, skip), np.arange(0, N, skip))
-            U = v_x[::skip, ::skip]
-            V = v_y[::skip, ::skip]
-            magnitude = np.sqrt(U**2 + V**2) * 0.5
-            max_mag = np.percentile(magnitude, 95)
-            clip_mag = np.maximum(magnitude, max_mag)
-            U_normalized = U / (clip_mag + 1e-12)
-            V_normalized = V / (clip_mag + 1e-12)
-            self.ax_velocity.clear()
-            self.ax_velocity.quiver(X, Y, U_normalized, V_normalized, scale=25, alpha=0.7)
-            self.ax_velocity.set_title("Phase Velocity Field")
-            self.ax_velocity.set_xlim(0, N)
-            self.ax_velocity.set_ylim(0, N)
+            U = vx[::skip, ::skip]
+            V = vy[::skip, ::skip]
+            mag = np.sqrt(U**2 + V**2) * 0.5
+            max_m = np.percentile(mag, 95)
+            clip_m = np.maximum(mag, max_m)
+            U = U / (clip_m + 1e-12)
+            V = V / (clip_m + 1e-12)
+            self.ax10.clear()
+            self.ax10.quiver(X, Y, U, V, scale=25, alpha=0.7)
+            self.ax10.set_title("Phase Velocity Field")
+            self.ax10.set_xlim(0, N)
+            self.ax10.set_ylim(0, N)
+        
+        # Update spatial diagnostics
+        if frame % 3 == 0:
+            corr = self.correlation_func()
+            r = np.arange(len(corr))
+            self.line7.set_data(r, corr)
+            
+            # Histogram
+            phi_mag = np.sqrt(self.phi_r**2 + self.phi_i**2)
+            phi_n = phi_mag.flatten() / fa
+            self.ax8.clear()
+            c, b, _ = self.ax8.hist(phi_n, bins=60, density=True, alpha=0.7, color='blue', ec='black', lw=0.5)
+            vac = 1.0/np.sqrt(2)
+            self.ax8.axvline(x=vac, color='red', ls='--', label=r'$|\phi|=f_a/\sqrt{2}$ (vacuum)', lw=2)
+            m = np.mean(phi_n)
+            s = np.std(phi_n)
+            bw = b[1] - b[0]
+            integ = np.sum(c) * bw
+            self.ax8.text(0.98, 0.98, f'μ={m:.3f}, σ={s:.3f}\n∫P(x)dx={integ:.3f}',
+                         transform=self.ax8.transAxes, va='top', ha='right',
+                         bbox=dict(fc='white', alpha=0.8), fontsize=9)
+            self.ax8.set_title("Field Magnitude Distribution")
+            self.ax8.set_xlabel(r"$|\phi| / f_a$")
+            self.ax8.set_ylabel("Probability Density")
+            x0 = max(0, min(vac-0.3, m-3*s))
+            x1 = max(vac+0.3, m+3*s)
+            self.ax8.set_xlim(x0, x1)
+            if len(c) > 0:
+                self.ax8.set_ylim(0, np.max(c)*1.15)
+            self.ax8.legend(fontsize=8, loc='upper left')
+            self.ax8.grid(alpha=0.3, ls=':')
+            
+            # Vorticity
+            vx, vy, _ = self.velocity_field()
+            vort = self.vorticity(vx, vy)
+            v_max = np.percentile(np.abs(vort), 99)
+            self.im9.set_data(vort)
+            self.im9.set_clim(-v_max, v_max)
+        
+        # Time plots
+        if len(self.t_list) > 1:
+            t = np.array(self.t_list)
+            self.line11a.set_data(t, self.E_tot)
+            self.line11b.set_data(t, self.E_kin)
+            self.line11c.set_data(t, self.E_grad)
+            self.line11d.set_data(t, self.E_pot)
+            
+            if t[-1] > t[0]:
+                self.ax11.set_xlim(t[0], t[-1])
+            if len(t) > 5:
+                y0 = min(min(self.E_kin), min(self.E_grad), min(self.E_pot))
+                y1 = max(self.E_tot)
+                if y1 > y0:
+                    self.ax11.set_ylim(y0*0.5, y1*2)
+            
+            if t[-1] > 2:
+                m = t > 2
+                tf = t[m]
+                if len(tf) > 1:
+                    Lf = np.array(self.L_string)[m]
+                    self.line12.set_data(tf, Lf)
+                    self.ax12.set_xlim(tf[0], tf[-1])
+                    if max(Lf) > 0:
+                        self.ax12.set_ylim(0, max(Lf)*1.1)
+                    
+                    if len(tf) > 6:
+                        lt = np.log10(tf[5:] + 1e-12)
+                        lL = np.log10(Lf[5:] + 1e-12)
+                        self.line13.set_data(lt, lL)
+                        
+                        if len(lt) > 10:
+                            sl, _, _, _, _ = linregress(lt[-20:], lL[-20:])
+                            self.txt13.set_text(f'L ~ t^{sl:.2f}')
+                        
+                        if len(lt) > 0 and lt[-1] > lt[0]:
+                            self.ax13.set_xlim(lt[0], lt[-1])
+                        if len(lL) > 0 and max(lL) > min(lL):
+                            self.ax13.set_ylim(min(lL)-0.5, max(lL)+0.5)
+            
+            has_range = len(t) > 1 and t[-1] > t[0]
+            
+            if len(self.v_string) > 0:
+                self.line14.set_data(t, self.v_string)
+                if has_range:
+                    self.ax14.set_xlim(t[0], t[-1])
+                mv = max(self.v_string)
+                if mv > 0:
+                    self.ax14.set_ylim(0, mv*1.1)
+            
+            if len(self.d_string) > 0:
+                d = np.array(self.d_string)
+                vm = d > 0
+                if np.any(vm):
+                    self.line15.set_data(t[vm], d[vm])
+                    if has_range:
+                        self.ax15.set_xlim(t[0], t[-1])
+                    self.ax15.set_ylim(0, max(d[vm])*1.1)
+            
+            if len(self.k_peak) > 0:
+                kp = np.array(self.k_peak)
+                vm = kp > 0
+                if np.any(vm):
+                    self.line16.set_data(t[vm], kp[vm])
+                    if has_range:
+                        self.ax16.set_xlim(t[0], t[-1])
+                    self.ax16.set_ylim(0, max(kp[vm])*1.1)
+            
+            if len(self.flux) > 0:
+                self.line17.set_data(t, self.flux)
+                if has_range:
+                    self.ax17.set_xlim(t[0], t[-1])
+                mf = max(self.flux)
+                if mf > 0:
+                    self.ax17.set_ylim(0, mf*1.1)
+            
+            if len(self.xi) > 0:
+                self.line18.set_data(t, self.xi)
+                if has_range:
+                    self.ax18.set_xlim(t[0], t[-1])
+                mx = max(self.xi)
+                if mx > 0:
+                    self.ax18.set_ylim(0, mx*1.1)
+        
+        return (self.im1, self.scat_p, self.scat_n, self.im2, self.im3, 
+                self.im4, self.line5, self.line6)
     
-    def _update_spectrum_visualizations(self) -> None:
-        """Updates power spectrum visualizations"""
-        power = self.compute_power_spectrum(self.phi_real, self.phi_imag)
-        self.spectrum_img.set_data(np.log10(power + 1e-12))
-        radial_phi = self.compute_radial_profile(np.log10(power + 1e-12))
-        axion_power = self.compute_axion_power_spectrum(self.phi_real, self.phi_imag)
-        radial_theta = self.compute_radial_profile(np.log10(axion_power + 1e-12))
-        k_vals = np.arange(len(radial_phi))
-        log_k = np.log10(k_vals[1:] + 1e-12)
-        log_radial_phi = radial_phi[1:]
-        log_radial_theta = radial_theta[1:]
-        self.spectrum_line.set_data(log_k, log_radial_phi)
-        self.axion_spectrum_line.set_data(log_k, log_radial_theta)
-        N = self.params.grid_size
-        fit_mask = (k_vals[1:] > 4) & (k_vals[1:] < N//2)
-        if np.any(fit_mask) and len(log_k[fit_mask]) > 3:
-            slope, _, _, _, _ = linregress(log_k[fit_mask], log_radial_phi[fit_mask])
-            self.spectral_index_txt.set_text(f'n = {-slope:.2f}')
-            slope_axion, _, _, _, _ = linregress(log_k[fit_mask], log_radial_theta[fit_mask])
-            self.axion_spectral_index_txt.set_text(f'n = {-slope_axion:.2f}')
-    
-    def _update_time_evolution_plots(self) -> None:
-        """Updates time evolution plots"""
-        if len(self.time_data.times) <= 1:
-            return
-        times = np.array(self.time_data.times)
-        self.energy_lines['total'].set_data(times, self.time_data.total_energy)
-        self.energy_lines['kinetic'].set_data(times, self.time_data.kinetic_energy)
-        self.energy_lines['gradient'].set_data(times, self.time_data.gradient_energy)
-        self.energy_lines['potential'].set_data(times, self.time_data.potential_energy)
-        # Updates axis limits for energy plot
-        if times[-1] > times[0]:
-            self.ax_energy_time.set_xlim(times[0], times[-1])
-        if len(times) > 5:
-            y_min = min(
-                min(self.time_data.kinetic_energy),
-                min(self.time_data.gradient_energy),
-                min(self.time_data.potential_energy)
-            )
-            y_max = max(self.time_data.total_energy)
-            if y_max > y_min:
-                self.ax_energy_time.set_ylim(y_min * 0.5, y_max * 2)
-        # Updates string evolution plots (only for times > 2)
-        if times[-1] > 2:
-            mask = times > 2
-            times_filtered = times[mask]
-            if len(times_filtered) > 1:
-                string_length_filtered = np.array(self.time_data.string_length)[mask]
-                self.string_length_line.set_data(times_filtered, string_length_filtered)
-                self.ax_string_time.set_xlim(times_filtered[0], times_filtered[-1])
-                if max(string_length_filtered) > 0:
-                    self.ax_string_time.set_ylim(0, max(string_length_filtered) * 1.1)
-                if len(times_filtered) > 6:
-                    log_times = np.log10(times_filtered[5:] + 1e-12)
-                    log_strings = np.log10(string_length_filtered[5:] + 1e-12)
-                    self.scaling_line.set_data(log_times, log_strings)
-                    if len(log_times) > 0 and log_times[-1] > log_times[0]:
-                        self.ax_scaling.set_xlim(log_times[0], log_times[-1])
-                    if len(log_strings) > 0 and max(log_strings) > min(log_strings):
-                        self.ax_scaling.set_ylim(min(log_strings) - 0.5, max(log_strings) + 0.5)
     
     
-    def run_simulation(self) -> None:
-        """
-        Runs the complete simulation with real-time visualization
-        """
-        total_frames = self.params.total_steps // self.params.animation_interval
-        self.ani1 = animation.FuncAnimation(
-            self.fig1, self.update_visualization, frames=total_frames,
-            interval=150, blit=False, repeat=False) 
-        self.ani2 = animation.FuncAnimation(
-            self.fig2, lambda frame: (), frames=total_frames,
+    def run(self):
+        nframes = total_steps // anim_interval
+        self.anim1 = animation.FuncAnimation(
+            self.fig1, self.update, frames=nframes,
+            interval=150, blit=False, repeat=False)
+        self.anim2 = animation.FuncAnimation(
+            self.fig2, lambda f: (), frames=nframes,
             interval=150, blit=False, repeat=False)
         plt.show()
-    
+
 
 
 def main():
-    params = SimulationParameters(grid_size=100,
-                                  spatial_resolution=1.0,
-                                  time_step=0.05,
-                                  total_steps=500,
-                                  animation_interval=4,
-                                  vacuum_expectation=1.0,
-                                  self_interaction_strength=1.0,
-                                  damping_coefficient=0.0)
-    simulation = AxionFieldSimulation(params)
-    print("Starting axion field dynamics simulation...")
-    print(f"Grid size: {params.grid_size}x{params.grid_size}")
-    print(f"Total simulation time: {params.total_steps * params.time_step:.2f}")
-    print(f"Animation frames: {params.total_steps // params.animation_interval}")
-    simulation.run_simulation()
-    
+    sim = AxionSim()
+    sim.run()
+
+
+
 if __name__ == "__main__":
     main()
